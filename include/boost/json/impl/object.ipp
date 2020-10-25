@@ -153,6 +153,33 @@ object(detail::unchecked_object&& uo)
     auto dest = begin();
     auto src = uo.release();
     auto const end = src + 2 * uo.size();
+    if(t_->is_small())
+    {
+        while(src != end)
+        {
+            access::construct_key_value_pair(
+                dest, pilfer(src[0]), pilfer(src[1]));
+            src += 2;
+            auto result = find_impl(dest->key());
+            if(! result.first)
+            {
+                ++dest;
+                ++t_->size;
+                continue;
+            }
+            // handle duplicate
+            auto& v = *result.first;
+            // don't bother to check if
+            // storage deallocate is trivial
+            v.~key_value_pair();
+            // trivial relocate
+            std::memcpy(
+                static_cast<void*>(&v),
+                    dest, sizeof(v));
+            ++t_->size;
+        }
+        return;
+    }
     while(src != end)
     {
         access::construct_key_value_pair(
@@ -250,6 +277,17 @@ object(
 {
     reserve(other.size());
     revert_construct r(*this);
+    if(t_->is_small())
+    {
+        for(auto const& v : other)
+        {
+            ::new(end())
+                key_value_pair(v, sp_);
+            ++t_->size;
+        }
+        r.commit();
+        return;
+    }
     for(auto const& v : other)
     {
         // skip duplicate checking
@@ -350,6 +388,33 @@ insert(
             BOOST_CURRENT_LOCATION);
     reserve(n0 + init.size());
     revert_insert r(*this);
+    if(t_->is_small())
+    {
+        for(auto& iv : init)
+        {
+            auto result =
+                find_impl(iv.first);
+            if(! result.first)
+            {
+                *::new(end()) key_value_pair(
+                    iv.first,
+                    iv.second.make_value(sp_));
+                ++t_->size;
+                continue;
+            }
+            // handle duplicate
+            key_value_pair kv(
+                iv.first,
+                iv.second.make_value(sp_));
+            // don't bother to check if
+            // storage deallocate is trivial
+            auto& v = *result.first;
+            v.~key_value_pair();
+            ::new(&v) key_value_pair(pilfer(kv));
+        }
+        r.commit();
+        return;
+    }
     for(auto& iv : init)
     {
         auto& head = t_->bucket(iv.first);
@@ -400,6 +465,21 @@ erase(const_iterator pos) noexcept ->
     iterator
 {
     auto p = begin() + (pos - begin());
+    if(t_->is_small())
+    {
+        p->~value_type();
+        --t_->size;
+        auto const pb = end();
+        if(p != end())
+        {
+            // the casts silence warnings
+            std::memcpy(
+                static_cast<void*>(p),
+                static_cast<void const*>(pb),
+                sizeof(*p));
+        }
+        return p;
+    }
     remove(t_->bucket(p->key()), *p);
     p->~value_type();
     --t_->size;
@@ -580,6 +660,16 @@ find_impl(
             std::size_t>
 {
     BOOST_ASSERT(t_ != &empty_);
+    if(t_->is_small())
+    {
+        auto it = &(*t_)[0];
+        auto const last =
+            &(*t_)[t_->size];
+        for(;it != last; ++it)
+            if(key == it->key())
+                return { it, 0 };
+        return { nullptr, 0 };
+    }
     std::pair<
         key_value_pair*,
         std::size_t> result;
@@ -625,6 +715,13 @@ insert_impl(
 {
     BOOST_ASSERT(
         capacity() > size());
+    if(t_->is_small())
+    {
+        auto const pv = ::new(end())
+            key_value_pair(p);
+        ++t_->size;
+        return pv;
+    }
     auto& head =
         t_->bucket(hash);
     auto const pv = ::new(end())
@@ -656,17 +753,20 @@ rehash(std::size_t new_capacity)
     table::deallocate(t_, sp_);
     t_ = t;
 
-    // rebuild hash table,
-    // without dup checks
-    auto p = end();
-    index_t i = t_->size;
-    while(i-- > 0)
+    if(! t_->is_small())
     {
-        --p;
-        auto& head =
-            t_->bucket(p->key());
-        access::next(*p) = head;
-        head = i;
+        // rebuild hash table,
+        // without dup checks
+        auto p = end();
+        index_t i = t_->size;
+        while(i-- > 0)
+        {
+            --p;
+            auto& head =
+                t_->bucket(p->key());
+            access::next(*p) = head;
+            head = i;
+        }
     }
 }
 
@@ -713,6 +813,7 @@ remove(
     index_t& head,
     key_value_pair& v) noexcept
 {
+    BOOST_ASSERT(! t_->is_small());
     auto const i = static_cast<
         index_t>(&v - begin());
     if(head == i)

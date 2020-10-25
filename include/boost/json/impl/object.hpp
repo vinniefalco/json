@@ -38,6 +38,13 @@ struct alignas(key_value_pair)
 
     constexpr table();
 
+    // returns true if we use a linear
+    // search instead of the hash table.
+    bool is_small() const noexcept
+    {
+        return capacity < 6;
+    }
+
     key_value_pair&
     operator[](
         std::size_t pos) noexcept
